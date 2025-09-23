@@ -544,6 +544,9 @@ class CryptoAlertBot:
     async def run(self) -> None:
         """Run the bot indefinitely, scanning at fixed intervals."""
         logging.info("Starting CryptoAlertBot...")
+                 
+
+        
         while True:
             start_time = time.time()
             try:
@@ -582,7 +585,7 @@ def load_default_config() -> BotConfig:
         PairConfig(symbol="XRPUSDT", timeframes=["1h", "4h", "1d", "1w"]),
         PairConfig(symbol="DOGEUSDT", timeframes=["1h", "4h", "1d", "1w"]),
         PairConfig(symbol="AAVEUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-        PairConfig(symbol="HYPEUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+        PairConfig(symbol="ADAUSDT", timeframes=["1h", "4h", "1d", "1w"]),
         PairConfig(symbol="ATOMUSDT", timeframes=["1h", "4h", "1d", "1w"]),
         PairConfig(symbol="LINKUSDT", timeframes=["1h", "4h", "1d", "1w"]),
     ]
