@@ -1,0 +1,427 @@
+"""
+Crypto Alert Bot with Aggregated Summaries
+-----------------------------------------
+
+This script monitors a list of cryptocurrency trading pairs across several
+timeframes and evaluates a set of technical indicators (moving averages,
+RSI, MACD and volume) to detect potential bullish or bearish signals.  In
+contrast to the original implementation that emitted a separate Telegram
+message for every pair and every timeframe, this version aggregates the
+signals into concise summaries.  It sends a single global summary that
+captures the overall market tone (including Fear & Greed index and a tally
+of bullish/bearish signals) and individual summaries for each asset that
+describe the short‑term, medium‑term and long‑term trends.
+
+If an OpenAI API key is supplied via the `OPENAI_API_KEY` environment
+variable, the bot uses OpenAI's Chat Completions API to transform the raw
+signal data into polished, human‑readable prose.  The OpenAI API can
+perform a variety of text transformation tasks such as summarisation,
+rewriting and improvement【435203994858066†L45-L51】.  A call to the
+`chat.completions.create` endpoint with a prompt instructing the model to
+"summarize the following text" will return a succinct summary【435203994858066†L185-L204】.
+Without an API key, a simple fallback summarisation routine is used.
+
+To run the bot you need to set the following environment variables:
+
+* `TELEGRAM_TOKEN` – Bot token obtained from BotFather.
+* `TELEGRAM_CHAT_ID` – Identifier of the chat (user, group or channel) that
+  should receive the alerts.
+* `OPENAI_API_KEY` – (optional) API key for OpenAI.  If omitted, the bot
+  falls back to a basic summarisation strategy.
+
+The script is designed for periodic execution (e.g. via a scheduler).
+
+"""
+
+import os
+import json
+import logging
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+import requests
+import pandas as pd
+from telegram import Bot
+
+try:
+    # OpenAI is optional; import lazily.
+    import openai  # type: ignore
+except ImportError:
+    openai = None  # type: ignore
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
+
+@dataclass
+class PairConfig:
+    """Configuration for a trading pair and its timeframes."""
+    symbol: str
+    timeframes: List[str]
+
+
+# List of trading pairs to monitor.  Each entry defines the symbol and the
+# intraday/daily/weekly timeframes of interest.  The HYPE pair has been
+# replaced by ADA to avoid invalid symbol errors.
+PAIRS: List[PairConfig] = [
+    PairConfig(symbol="BTCUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="ETHUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="BNBUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="SOLUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="XRPUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="DOGEUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="AAVEUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="ADAUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="ATOMUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="LINKUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+]
+
+
+def fetch_klines(symbol: str, interval: str, limit: int = 300) -> Optional[pd.DataFrame]:
+    """Fetch historical OHLCV data from Binance.
+
+    Args:
+        symbol: Trading pair symbol (e.g. "BTCUSDT").
+        interval: Candle interval (e.g. "1h", "1d").
+        limit: Number of candles to retrieve.
+
+    Returns:
+        DataFrame with columns open_time, open, high, low, close, volume, or
+        None if an error occurred.
+    """
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        columns = [
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_asset_volume",
+            "number_of_trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "ignore",
+        ]
+        df = pd.DataFrame(data, columns=columns)
+        # Convert numeric columns to floats
+        numeric_cols = ["open", "high", "low", "close", "volume"]
+        df[numeric_cols] = df[numeric_cols].astype(float)
+        return df
+    except requests.RequestException as exc:
+        logging.error(
+            "Failed to fetch klines for %s %s: %s", symbol, interval, exc
+        )
+        return None
+
+
+def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Compute the Relative Strength Index (RSI)."""
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    gain = up.ewm(alpha=1 / period, min_periods=period).mean()
+    loss = down.ewm(alpha=1 / period, min_periods=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def compute_macd(series: pd.Series) -> pd.DataFrame:
+    """Compute the MACD indicator along with its signal line and histogram."""
+    ema_fast = series.ewm(span=12, adjust=False).mean()
+    ema_slow = series.ewm(span=26, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - signal
+    return pd.DataFrame({"macd": macd, "macd_signal": signal, "macd_hist": hist})
+
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Add moving averages, RSI and MACD columns to a DataFrame."""
+    df = df.copy()
+    df["ma50"] = df["close"].rolling(window=50).mean()
+    df["ma200"] = df["close"].rolling(window=200).mean()
+    df["rsi14"] = compute_rsi(df["close"], period=14)
+    macd_df = compute_macd(df["close"])
+    df = pd.concat([df, macd_df], axis=1)
+    return df
+
+
+def evaluate_signals(df: pd.DataFrame) -> Dict[str, any]:
+    """Evaluate technical indicators to classify bullish/bearish signals.
+
+    Returns a dictionary containing:
+        strength: number of validated indicators (0 means no signal)
+        direction: "bullish", "bearish" or "neutral"
+        indicators: list of indicator names that fired
+    """
+    indicators: List[str] = []
+    last_close = df["close"].iloc[-1]
+    ma50 = df["ma50"].iloc[-1]
+    ma200 = df["ma200"].iloc[-1]
+    rsi = df["rsi14"].iloc[-1]
+    macd = df["macd"].iloc[-1]
+    macd_signal = df["macd_signal"].iloc[-1]
+    macd_hist = df["macd_hist"].iloc[-1]
+    vol = df["volume"].iloc[-1]
+    vol_mean = df["volume"].rolling(window=20).mean().iloc[-1]
+
+    # Moving average crossovers
+    if ma50 > ma200:
+        indicators.append("ma50_above_ma200")
+    elif ma50 < ma200:
+        indicators.append("ma50_below_ma200")
+
+    # Price relative to long MA
+    if last_close > ma200:
+        indicators.append("price_above_ma200")
+    else:
+        indicators.append("price_below_ma200")
+
+    # RSI momentum
+    if rsi > 55:
+        indicators.append("rsi_bull")
+    elif rsi < 45:
+        indicators.append("rsi_bear")
+
+    # MACD cross
+    if macd > macd_signal:
+        indicators.append("macd_bull")
+    elif macd < macd_signal:
+        indicators.append("macd_bear")
+
+    # Histogram sign
+    if macd_hist > 0:
+        indicators.append("macd_hist_positive")
+    elif macd_hist < 0:
+        indicators.append("macd_hist_negative")
+
+    # Volume confirmation
+    if vol_mean > 0 and vol > vol_mean:
+        indicators.append("volume_above_average")
+
+    # Determine direction by majority of bull vs bear indicators
+    bull_count = sum(
+        1 for ind in indicators if "bull" in ind or "above" in ind or "positive" in ind
+    )
+    bear_count = sum(
+        1 for ind in indicators if "bear" in ind or "below" in ind or "negative" in ind
+    )
+    if bull_count > bear_count:
+        direction = "bullish"
+    elif bear_count > bull_count:
+        direction = "bearish"
+    else:
+        direction = "neutral"
+
+    # Strength based on number of indicators (thresholds: >=3 strong, 2 medium, 1 weak)
+    strength = len(indicators)
+    return {"strength": strength, "direction": direction, "indicators": indicators}
+
+
+def get_fear_greed_index() -> Optional[Dict[str, str]]:
+    """Fetch the latest Crypto Fear & Greed index value and classification."""
+    url = "https://api.alternative.me/fng/"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if "data" in data and data["data"]:
+            entry = data["data"][0]
+            return {
+                "value": entry.get("value"),
+                "classification": entry.get("value_classification"),
+            }
+    except Exception as exc:
+        logging.error("Failed to fetch Fear & Greed index: %s", exc)
+    return None
+
+
+def summarise_with_openai(system_prompt: str, user_prompt: str) -> Optional[str]:
+    """Use OpenAI's Chat Completions API to summarise text.
+
+    Returns the assistant's message content or None if OpenAI is unavailable or
+    not configured.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if openai is None or not api_key:
+        return None
+    try:
+        client = openai.OpenAI(api_key=api_key)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        response = client.chat.completions.create(
+            model="gpt-4", messages=messages, temperature=0.2
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as exc:
+        logging.error("OpenAI summarisation failed: %s", exc)
+        return None
+
+
+def build_manual_global_summary(
+    results: Dict[str, Dict[str, Dict[str, any]]], fear_greed: Optional[Dict[str, str]]
+) -> str:
+    """Fallback summary builder when OpenAI is unavailable.
+
+    Creates a brief textual overview of the market by counting bullish and
+    bearish timeframes and reporting the Fear & Greed index.  Also lists
+    symbols with their dominant direction.
+    """
+    bullish = 0
+    bearish = 0
+    neutral = 0
+    pair_overview = []
+    for symbol, tf_signals in results.items():
+        # Determine majority direction for the pair
+        counts = {"bullish": 0, "bearish": 0, "neutral": 0}
+        for tf_res in tf_signals.values():
+            counts[tf_res["direction"]] += 1
+        dominant = max(counts, key=counts.get)
+        pair_overview.append(f"{symbol}: {dominant}")
+        bullish += counts["bullish"]
+        bearish += counts["bearish"]
+        neutral += counts["neutral"]
+    lines = []
+    total_timeframes = bullish + bearish + neutral
+    if total_timeframes > 0:
+        lines.append(
+            f"Global signals: {bullish} bullish, {bearish} bearish, {neutral} neutral across {total_timeframes} timeframes."
+        )
+    if fear_greed:
+        lines.append(
+            f"Fear & Greed index: {fear_greed.get('value')} ({fear_greed.get('classification')})."
+        )
+    if pair_overview:
+        lines.append("Pair overview:")
+        lines.extend(pair_overview)
+    return "\n".join(lines)
+
+
+def build_manual_pair_summary(symbol: str, tf_signals: Dict[str, Dict[str, any]]) -> str:
+    """Fallback summary for a single asset.
+
+    Summarises the short, medium and long‑term signals for the pair without
+    external AI.
+    """
+    lines = [f"Summary for {symbol}:"]
+    # Map timeframes to horizons
+    horizon_map = {"1h": "short term", "4h": "short term", "1d": "medium term", "1w": "long term"}
+    horizon_summary: Dict[str, List[str]] = {"short term": [], "medium term": [], "long term": []}
+    for timeframe, sig in tf_signals.items():
+        horizon = horizon_map.get(timeframe, timeframe)
+        horizon_summary[horizon].append(sig["direction"])
+    for horizon, directions in horizon_summary.items():
+        if not directions:
+            continue
+        # Determine dominant direction for this horizon
+        counts = {"bullish": 0, "bearish": 0, "neutral": 0}
+        for d in directions:
+            counts[d] += 1
+        dominant = max(counts, key=counts.get)
+        lines.append(f"- {horizon}: {dominant} ({len(directions)} timeframes)")
+    return "\n".join(lines)
+
+
+def summarise_results(
+    results: Dict[str, Dict[str, Dict[str, any]]]
+) -> (str, Dict[str, str]):
+    """Create summaries for the market and each asset using OpenAI if available.
+
+    Returns:
+        global_summary: Single string summarising the overall market
+        pair_summaries: Dict mapping symbol -> summary string
+    """
+    # Compute global stats for manual summarisation and to enrich AI prompts
+    fear_greed = get_fear_greed_index()
+    global_stats = {
+        "bullish_count": 0,
+        "bearish_count": 0,
+        "neutral_count": 0,
+    }
+    for symbol, tf_signals in results.items():
+        for tf_res in tf_signals.values():
+            global_stats[f"{tf_res['direction']}_count"] += 1
+    # Build JSON‑serialisable summary of signals
+    summary_data = {
+        "pairs": results,
+        "global_stats": global_stats,
+        "fear_greed": fear_greed,
+    }
+    # Try OpenAI summarisation first
+    system_prompt = (
+        "You are an expert crypto analyst. Based on technical signals you will "
+        "provide concise summaries describing market trends."
+    )
+    user_prompt = (
+        "Summarise the following data into: (1) a global overview of the overall "
+        "crypto market highlighting the number of bullish, bearish and neutral "
+        "signals and the Fear & Greed index, and (2) individual summaries for "
+        "each asset covering short‑term (1h & 4h), medium‑term (1d) and long‑term "
+        "(1w) outlooks. Be brief but informative.\n\n"
+        + json.dumps(summary_data)
+    )
+    openai_result = summarise_with_openai(system_prompt, user_prompt)
+    pair_summaries: Dict[str, str] = {}
+    if openai_result:
+        # If the AI returned a single text covering everything, we send it as the
+        # global summary and don't create separate messages per pair.
+        return openai_result, pair_summaries
+    # Fallback: build manual summaries
+    global_summary = build_manual_global_summary(results, fear_greed)
+    for symbol, tf_signals in results.items():
+        pair_summaries[symbol] = build_manual_pair_summary(symbol, tf_signals)
+    return global_summary, pair_summaries
+
+
+def run_bot() -> None:
+    """Main entry point for running the crypto alert bot."""
+    telegram_token = os.getenv("TELEGRAM_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not telegram_token or not chat_id:
+        logging.error("TELEGRAM_TOKEN or TELEGRAM_CHAT_ID environment variables are missing.")
+        return
+    bot = Bot(token=telegram_token)
+    results: Dict[str, Dict[str, Dict[str, any]]] = {}
+    for pair in PAIRS:
+        pair_results: Dict[str, Dict[str, any]] = {}
+        for timeframe in pair.timeframes:
+            df = fetch_klines(pair.symbol, timeframe)
+            if df is None or len(df) < 200:
+                continue
+            df_ind = add_indicators(df)
+            sig = evaluate_signals(df_ind)
+            # Only retain signals where at least one indicator fired
+            if sig["strength"] > 0:
+                pair_results[timeframe] = sig
+        if pair_results:
+            results[pair.symbol] = pair_results
+    if not results:
+        logging.info("No valid signals found across all pairs/timeframes.")
+        return
+    global_summary, pair_summaries = summarise_results(results)
+    try:
+        # Send global summary first
+        bot.send_message(chat_id=chat_id, text=global_summary)
+        # Then send individual summaries, if provided
+        for symbol, summary in pair_summaries.items():
+            bot.send_message(chat_id=chat_id, text=summary)
+    except Exception as exc:
+        logging.error("Failed to send Telegram message: %s", exc)
+
+
+if __name__ == "__main__":
+    run_bot()
