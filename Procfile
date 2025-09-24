@@ -1,2 +1,2 @@
-worker: python crypto_alert_bot_v2.py
+worker: python crypto_alert_bot.py
 
