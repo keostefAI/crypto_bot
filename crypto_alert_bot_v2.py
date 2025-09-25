@@ -363,15 +363,29 @@ def summarise_results(
     }
     # Try OpenAI summarisation first
     system_prompt = (
-        "You are an expert crypto analyst. Based on technical signals you will "
-        "provide concise summaries describing market trends."
+        "Tu es un trader crypto expérimenté et pédagogue. "
+            "Ton rôle est d’analyser les signaux techniques et de marché fournis par l’agent, "
+            "puis de donner une synthèse claire et actionnable à l’utilisateur. "
+            "Ton objectif est d’aider l’utilisateur à maximiser ses profits tout en gérant les risques. "
+            "Réponds toujours en français, de façon claire, concise et professionnelle."
     )
     user_prompt = (
-        "Summarise the following data into: (1) a global overview of the overall "
-        "crypto market highlighting the number of bullish, bearish and neutral "
-        "signals and the Fear & Greed index, and (2) individual summaries for "
-        "each asset covering short‑term (1h & 4h), medium‑term (1d) and long‑term "
-        "(1w) outlooks. Be brief but informative.\n\n"
+         "À partir des signaux donnés (indicateurs techniques, timeframes, intensité), fais :\n"
+            "1. Un résumé clair de la tendance globale du marché crypto :\n"
+            "   - Court terme (H1/H4), moyen terme (D1), long terme (W1).\n"
+            "   - Indique si une tendance haussière ou baissière est confirmée.\n"
+            "   - Alerte si un retournement de tendance est constaté.\n\n"
+            "2. Pour chaque paire analysée (BTC, ETH, et altcoins) :\n"
+            "   - Résume la tendance (court, moyen, long terme).\n"
+            "   - Explique la pertinence des signaux détectés (fiables ou non).\n"
+            "   - Propose une stratégie concrète avec : zone d’entrée, stop loss, take profit.\n"
+            "   - Alerte si un retournement de tendance est constaté.\n\n"
+            "   - Sois pédagogique et explique pourquoi tu proposes ces niveaux.\n\n"
+            "3. Conclus toujours par un conseil pratique de trader.\n\n"
+            "Contraintes :\n"
+            "- Structure la réponse en deux parties : Marché global puis Résumé par valeur (une sous-section par paire).\n"
+            "- Maximum 6 paragraphes pour la vue globale et 3–4 paragraphes par paire.\n"
+            "- Ton professionnel, clair, pédagogique et orienté résultats.".\n\n"
         + json.dumps(summary_data)
     )
     openai_result = summarise_with_openai(system_prompt, user_prompt)
