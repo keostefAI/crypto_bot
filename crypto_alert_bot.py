@@ -385,7 +385,7 @@ def summarise_results(
             "Contraintes :\n"
             "- Structure la réponse en deux parties : Marché global puis Résumé par valeur (une sous-section par paire).\n"
             "- Maximum 6 paragraphes pour la vue globale et 3–4 paragraphes par paire.\n"
-            "- Ton professionnel, clair, pédagogique et orienté résultats.".\n\n"
+            "- Ton professionnel, clair, pédagogique et orienté résultats."
         + json.dumps(summary_data)
     )
     openai_result = summarise_with_openai(system_prompt, user_prompt)
