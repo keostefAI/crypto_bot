@@ -1,4 +1,4 @@
 requests
 pandas
 python-telegram-bot==20.1
-pip install openai
+openai
