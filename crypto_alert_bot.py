@@ -394,7 +394,7 @@ def summarise_results(
             "1. Un point synthétique sur la tendance du marché crypto :\n"
             "   - Court terme (H1/H4), moyen terme (D1), long terme (W1).\n"
             "   - Indique si une tendance haussière ou baissière est confirmée.\n"
-            "   - Alerte si un retournement de tendance est constaté.
+            "   - Alerte si un retournement de tendance est constaté.\n"
             "   Exemple de sortie : \n"
             " Marché global : Le marché crypto montre une tendance haussière forte en court terme (H4), soutenue par un RSI global positif et une dominance BTC en hausse. \n"
             " À moyen terme (D1), on observe une consolidation, sans retournement confirmé. \n"
