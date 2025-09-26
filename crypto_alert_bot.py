@@ -381,7 +381,9 @@ def summarise_results(
         "global_stats": global_stats,
         "fear_greed": fear_greed,
     }
-    # Try OpenAI summarisation first
+    # Try OpenAI summarisation first for the global view.  The pair summaries
+    # will be constructed separately, so we ignore any per‑pair content
+    # returned by the LLM.
     system_prompt = (
         "Tu es un trader crypto expérimenté et pédagogue. "
             "Ton rôle est d’analyser les signaux techniques et de marché fournis par l’agent, "
@@ -449,20 +451,131 @@ def run_bot() -> None:
                 continue
             df_ind = add_indicators(df)
             sig = evaluate_signals(df_ind)
+            # Always capture the last close price for trade planning
+            sig_with_price = dict(sig)
+            sig_with_price["last_close"] = df_ind["close"].iloc[-1]
             # Only retain signals where at least one indicator fired
-            if sig["strength"] > 0:
-                pair_results[timeframe] = sig
+            if sig_with_price["strength"] > 0:
+                pair_results[timeframe] = sig_with_price
         if pair_results:
             results[pair.symbol] = pair_results
     if not results:
         logging.info("No valid signals found across all pairs/timeframes.")
         return
     global_summary, pair_summaries = summarise_results(results)
+    # Build custom summaries for each asset.  We ignore any per‑pair content
+    # returned by the LLM and construct simplified messages instead.  Each
+    # message lists the trend by timeframe and provides a basic trade plan
+    # based on the current price and dominant trend.
+    def summarise_pair_trade_plan(symbol: str, tf_signals: Dict[str, Dict[str, any]]) -> str:
+        """Create a simplified summary and trade plan for a single trading pair.
+
+        This helper determines the dominant trend on short (1h/4h), medium (1d)
+        and long (1w) horizons and proposes a basic trade plan using the
+        latest available close price.  The plan uses heuristics: for a
+        predominantly bullish trend, it suggests a long entry range around
+        the current price with stop loss and multiple take profit levels.
+        For a bearish trend, it notes the opportunity on the short term and
+        advises waiting for confirmation rather than opening a position.
+
+        Args:
+            symbol: The asset symbol (e.g. "BTCUSDT").
+            tf_signals: Mapping from timeframe to signal data including
+                direction and last_close.
+
+        Returns:
+            A human‑readable string summarising the signals and plan.
+        """
+        # Determine last close price (prefer 1h, else fall back through other
+        # timeframes).  This price will be used to compute entry ranges and
+        # profit/stop levels.
+        last_close = None
+        for tf in ["1h", "4h", "1d", "1w"]:
+            if tf in tf_signals and "last_close" in tf_signals[tf]:
+                last_close = tf_signals[tf]["last_close"]
+                break
+        # Build a string summarising the raw directions across all timeframes
+        directions_parts: List[str] = []
+        for tf in ["1h", "4h", "1d", "1w"]:
+            if tf in tf_signals:
+                dir_name = tf_signals[tf]["direction"].capitalize()
+                directions_parts.append(f"{tf} : {dir_name}")
+        directions_text = " - ".join(directions_parts)
+        # Determine dominant directions for short, medium and long horizons
+        horizon_map = {"1h": "short", "4h": "short", "1d": "medium", "1w": "long"}
+        horizon_counts: Dict[str, Dict[str, int]] = {
+            "short": {"Bullish": 0, "Bearish": 0, "Neutral": 0},
+            "medium": {"Bullish": 0, "Bearish": 0, "Neutral": 0},
+            "long": {"Bullish": 0, "Bearish": 0, "Neutral": 0},
+        }
+        for tf, data in tf_signals.items():
+            horizon = horizon_map.get(tf, "short")
+            direction = data["direction"].capitalize()
+            if direction in horizon_counts[horizon]:
+                horizon_counts[horizon][direction] += 1
+        # Determine majority per horizon
+        dominant_by_horizon: Dict[str, str] = {}
+        for horizon, counts in horizon_counts.items():
+            # Pick the direction with the highest count; if tie, pick Neutral
+            dominant = max(counts, key=lambda k: (counts[k], k == "Neutral"))
+            dominant_by_horizon[horizon] = dominant
+        # Compose plan
+        plan_lines: List[str] = []
+        # Determine if there is any bullish direction across horizons
+        any_bullish = any(val == "Bullish" for val in dominant_by_horizon.values())
+        any_bearish = any(val == "Bearish" for val in dominant_by_horizon.values())
+        # Example plan heuristics
+        if last_close and any_bullish:
+            # Compute entry range ±0.5% of last close
+            entry_min = last_close * 0.995
+            entry_max = last_close * 1.005
+            stop_loss = last_close * 0.97
+            tp1 = last_close * 1.03
+            tp2 = last_close * 1.05
+            # Format numbers with dynamic precision based on price magnitude
+            def fmt(x: float) -> str:
+                if x >= 1000:
+                    return f"{x:,.0f}".replace(",", " ")
+                elif x >= 100:
+                    return f"{x:,.2f}".replace(",", " ")
+                elif x >= 1:
+                    return f"{x:,.3f}".replace(",", " ")
+                else:
+                    return f"{x:,.5f}".replace(",", " ")
+            plan_lines.append(
+                f"Plan : achat entre {fmt(entry_min)} et {fmt(entry_max)} $, stop loss {fmt(stop_loss)} $, take profit {fmt(tp1)} $ puis {fmt(tp2)} $."
+            )
+        elif any_bearish:
+            # Bearish trend; note opportunity on short term
+            plan_lines.append("Plan : attendre confirmation ou envisager une position courte si vous êtes expérimenté.")
+        else:
+            # Neutral or mixed; advise caution
+            plan_lines.append("Plan : rester à l’écart ou attendre un signal plus clair avant d’entrer.")
+        # Determine short‑term opportunity statement
+        opp_lines: List[str] = []
+        short_dir = dominant_by_horizon.get("short")
+        if short_dir == "Bullish":
+            opp_lines.append("Opportunité haussière court terme")
+        elif short_dir == "Bearish":
+            opp_lines.append("Opportunité baissière court terme")
+        elif short_dir == "Neutral":
+            opp_lines.append("Pas d’opportunité claire court terme")
+        # Build final summary
+        summary_lines = [f"{symbol} :", directions_text]
+        if opp_lines:
+            summary_lines.append(opp_lines[0])
+        if plan_lines:
+            summary_lines.extend(plan_lines)
+        return "\n".join(summary_lines)
+
     # Send messages using the helper
     try:
+        # Global summary always goes first
         send_telegram_message(telegram_token, chat_id, global_summary)
-        for symbol, summary in pair_summaries.items():
-            send_telegram_message(telegram_token, chat_id, summary)
+        # For each asset, build a simplified summary and send a separate message
+        for symbol, tf_signals in results.items():
+            summary_text = summarise_pair_trade_plan(symbol, tf_signals)
+            send_telegram_message(telegram_token, chat_id, summary_text)
     except Exception as exc:
         logging.error("Failed to send Telegram message: %s", exc)
 
