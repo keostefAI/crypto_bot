@@ -67,16 +67,10 @@ class PairConfig:
 # intraday/daily/weekly timeframes of interest.  The HYPE pair has been
 # replaced by ADA to avoid invalid symbol errors.
 PAIRS: List[PairConfig] = [
-    PairConfig(symbol="BTCUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-    PairConfig(symbol="ETHUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-    PairConfig(symbol="BNBUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-    PairConfig(symbol="SOLUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-    PairConfig(symbol="XRPUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-    PairConfig(symbol="DOGEUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-    PairConfig(symbol="AAVEUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-    PairConfig(symbol="ADAUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-    PairConfig(symbol="ATOMUSDT", timeframes=["1h", "4h", "1d", "1w"]),
-    PairConfig(symbol="LINKUSDT", timeframes=["1h", "4h", "1d", "1w"]),
+    PairConfig(symbol="BTCUSDT", timeframes=["4h", "1d", "1w"]),
+    PairConfig(symbol="ETHUSDT", timeframes=["4h", "1d", "1w"]),
+    PairConfig(symbol="BNBUSDT", timeframes=["4h", "1d", "1w"]),
+    PairConfig(symbol="SOLUSDT", timeframes=["4h", "1d", "1w"])
 ]
 
 
@@ -85,7 +79,7 @@ def fetch_klines(symbol: str, interval: str, limit: int = 300) -> Optional[pd.Da
 
     Args:
         symbol: Trading pair symbol (e.g. "BTCUSDT").
-        interval: Candle interval (e.g. "1h", "1d").
+        interval: Candle interval (e.g. "4h", "1d").
         limit: Number of candles to retrieve.
 
     Returns:
@@ -318,7 +312,7 @@ def build_manual_pair_summary(symbol: str, tf_signals: Dict[str, Dict[str, any]]
     """
     lines = [f"Summary for {symbol}:"]
     # Map timeframes to horizons
-    horizon_map = {"1h": "short term", "4h": "short term", "1d": "medium term", "1w": "long term"}
+    horizon_map = {"4h": "short term", "1d": "medium term", "1w": "long term"}
     horizon_summary: Dict[str, List[str]] = {"short term": [], "medium term": [], "long term": []}
     for timeframe, sig in tf_signals.items():
         horizon = horizon_map.get(timeframe, timeframe)
@@ -470,7 +464,7 @@ def run_bot() -> None:
     def summarise_pair_trade_plan(symbol: str, tf_signals: Dict[str, Dict[str, any]]) -> str:
         """Create a simplified summary and trade plan for a single trading pair.
 
-        This helper determines the dominant trend on short (1h/4h), medium (1d)
+        This helper determines the dominant trend on short (4h), medium (1d)
         and long (1w) horizons and proposes a basic trade plan using the
         latest available close price.  The plan uses heuristics: for a
         predominantly bullish trend, it suggests a long entry range around
@@ -486,23 +480,23 @@ def run_bot() -> None:
         Returns:
             A human‑readable string summarising the signals and plan.
         """
-        # Determine last close price (prefer 1h, else fall back through other
+        # Determine last close price (prefer 4h, else fall back through other
         # timeframes).  This price will be used to compute entry ranges and
         # profit/stop levels.
         last_close = None
-        for tf in ["1h", "4h", "1d", "1w"]:
+        for tf in ["4h", "1d", "1w"]:
             if tf in tf_signals and "last_close" in tf_signals[tf]:
                 last_close = tf_signals[tf]["last_close"]
                 break
         # Build a string summarising the raw directions across all timeframes
         directions_parts: List[str] = []
-        for tf in ["1h", "4h", "1d", "1w"]:
+        for tf in ["4h", "1d", "1w"]:
             if tf in tf_signals:
                 dir_name = tf_signals[tf]["direction"].capitalize()
                 directions_parts.append(f"{tf} : {dir_name}")
         directions_text = " - ".join(directions_parts)
         # Determine dominant directions for short, medium and long horizons
-        horizon_map = {"1h": "short", "4h": "short", "1d": "medium", "1w": "long"}
+        horizon_map = {"4h": "short", "1d": "medium", "1w": "long"}
         horizon_counts: Dict[str, Dict[str, int]] = {
             "short": {"Bullish": 0, "Bearish": 0, "Neutral": 0},
             "medium": {"Bullish": 0, "Bearish": 0, "Neutral": 0},
